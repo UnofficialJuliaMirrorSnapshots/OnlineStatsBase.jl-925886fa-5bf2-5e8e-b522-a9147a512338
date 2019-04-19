@@ -31,6 +31,26 @@ println("  > Counter")
     ==(mergevals(Counter(), y, y2)...)
 end
 
+#-----------------------------------------------------------------------# CountMap
+println("  > CountMap")
+@testset "CountMap" begin
+    a = fit!(CountMap(Bool), x)
+    @test sort(value(a)) == sort(countmap(x))
+    @test OnlineStatsBase.pdf(a, true) == mean(x)
+    @test OnlineStatsBase.pdf(a, false) == mean(!, x)
+    @test OnlineStatsBase.pdf(a, 2) == 0.0
+
+    b = fit!(CountMap(Int), z)
+    @test sort(value(b)) == sort(countmap(z))
+    for i in 1:11
+        @test OnlineStatsBase.pdf(b, i) ≈ sum(==(i), z) / n
+    end
+    @test all(x -> 0 < x < 1, OnlineStatsBase.probs(b))
+    @test OnlineStatsBase.probs(b, 11:13) == zeros(3)
+
+    @test ==(mergevals(CountMap(Bool), x, x2)...)
+    @test ==(mergevals(CountMap(Int), z, z2)...)
+end
 #-----------------------------------------------------------------------# Extrema
 println("  > Extrema")
 @testset "Extrema" begin
@@ -52,6 +72,39 @@ println("  > Extrema")
     @test value(fit!(Extrema(Char), "abc")) == ('a', 'c')
     @test value(fit!(Extrema(String), ["a", "b"])) == ("a", "b")
 end
+#-----------------------------------------------------------------------# Group
+@testset "Group" begin
+    o = fit!(5Mean(), OnlineStatsBase.eachrow(ymat))
+    @test o[1] == first(o)
+    @test 5Mean() == 5Mean()
+    @test collect(map(value, value(o))) ≈ vec(mean(ymat, dims=1))
+
+    o2 = Group(m1=Mean(), m2=Mean(), m3=Mean(), m4=Mean(), m5=Mean())
+    fit!(o2, eachrow(ymat))
+    @test collect(map(value, value(o2))) ≈ vec(mean(ymat, dims=1))
+    @test length(o2) == 5
+
+    a, b = mergevals(
+        Group(Mean(), Variance(), Sum(), Moments(), Mean()),
+        OnlineStatsBase.eachrow(ymat),
+        OnlineStatsBase.eachrow(ymat2)
+    )
+    for (ai, bi) in zip(a, b)
+        @test value(ai) ≈ value(bi)
+    end
+end
+#-----------------------------------------------------------------------# GroupBy
+@testset "GroupBy" begin
+    @test GroupBy(Bool, Mean()) == GroupBy(Bool, Mean())
+    d = value(fit!(GroupBy(Bool, Mean()), zip(x,y)))
+    @test value(d[true]) ≈ mean(y[x])
+    @test value(d[false]) ≈ mean(y[map(!,x)])
+
+    a, b = mergevals(GroupBy(Int, Mean()), zip(z,y), zip(z2, y2))
+    for (ai,bi) in zip(values(sort(a)), values(sort(b)))
+        @test value(ai) ≈ value(bi)
+    end
+end
 #-----------------------------------------------------------------------# Mean
 println("  > Mean")
 @testset "Mean" begin
@@ -59,6 +112,19 @@ println("  > Mean")
     @test value(o) ≈ mean(y)
     @test mean(o) ≈ mean(y)
     @test ≈(mergevals(Mean(), y, y2)...)
+end
+#-----------------------------------------------------------------------# Moments
+@testset "Moments" begin
+    o = fit!(Moments(), y)
+    @test value(o) ≈ [mean(y), mean(y .^ 2), mean(y .^ 3), mean(y .^ 4)]
+    @test mean(o) ≈ mean(y)
+    @test var(o) ≈ var(y)
+    @test std(o) ≈ std(y)
+    @test skewness(o) ≈ skewness(y)
+    @test kurtosis(o) ≈ kurtosis(y)
+    for (v1,v2) in zip(mergevals(Moments(), y, y2)...)
+        @test v1 ≈ v2
+    end
 end
 #-----------------------------------------------------------------------# Series/FTSeries
 println("  > Series/FTSeries")

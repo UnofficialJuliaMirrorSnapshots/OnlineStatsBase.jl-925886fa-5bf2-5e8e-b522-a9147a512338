@@ -16,6 +16,48 @@ Counter(T = Number) = Counter{T}()
 _fit!(o::Counter{T}, y) where {T} = (o.n += 1)
 _merge!(a::Counter, b::Counter) = (a.n += b.n)
 
+#-----------------------------------------------------------------------# CountMap
+"""
+    CountMap(T::Type)
+    CountMap(dict::AbstractDict{T, Int})
+
+Track a dictionary that maps unique values to its number of occurrences.  Similar to
+`StatsBase.countmap`.
+
+# Example
+
+    o = fit!(CountMap(Int), rand(1:10, 1000))
+    value(o)
+    probs(o)
+    OnlineStats.pdf(o, 1)
+    collect(keys(o))
+"""
+mutable struct CountMap{T, A <: AbstractDict{T, Int}} <: OnlineStat{T}
+    value::A  # OrderedDict by default
+    n::Int
+end
+CountMap{T}() where {T} = CountMap{T, OrderedDict{T,Int}}(OrderedDict{T,Int}(), 0)
+CountMap(T::Type = Any) = CountMap{T, OrderedDict{T,Int}}(OrderedDict{T, Int}(), 0)
+CountMap(d::D) where {T,D<:AbstractDict{T, Int}} = CountMap{T, D}(d, 0)
+function _fit!(o::CountMap, x)
+    o.n += 1
+    o.value[x] = get!(o.value, x, 0) + 1
+end
+_merge!(o::CountMap, o2::CountMap) = (merge!(+, o.value, o2.value); o.n += o2.n)
+function probs(o::CountMap, kys = keys(o.value))
+    out = zeros(Int, length(kys))
+    valkeys = keys(o.value)
+    for (i, k) in enumerate(kys)
+        out[i] = k in valkeys ? o.value[k] : 0
+    end
+    sum(out) == 0 ? Float64.(out) : out ./ sum(out)
+end
+pdf(o::CountMap, y) = y in keys(o.value) ? o.value[y] / nobs(o) : 0.0
+Base.keys(o::CountMap) = keys(o.value)
+nkeys(o::CountMap) = length(o.value)
+Base.values(o::CountMap) = values(o.value)
+Base.getindex(o::CountMap, i) = o.value[i]
+
 #-----------------------------------------------------------------------# Extrema
 """
     Extrema(T::Type = Float64)
@@ -35,10 +77,10 @@ mutable struct Extrema{T,S} <: OnlineStat{S}
     min::T
     max::T
     n::Int
-    function Extrema(T::Type = Float64)
-        a, b, S = extrema_init(T)
-        new{T,S}(a, b, 0)
-    end
+end
+function Extrema(T::Type = Float64)
+    a, b, S = extrema_init(T)
+    Extrema{T,S}(a, b, 0)
 end
 extrema_init(T::Type{<:Number}) = typemax(T), typemin(T), Number
 extrema_init(T::Type{String}) = "", "", String
@@ -59,6 +101,106 @@ value(o::Extrema) = (o.min, o.max)
 Base.extrema(o::Extrema) = value(o)
 Base.maximum(o::Extrema) = o.max
 Base.minimum(o::Extrema) = o.min
+
+#-----------------------------------------------------------------------# Group
+"""
+    Group(stats::OnlineStat...)
+    Group(; stats...)
+    Group(collection)
+
+Create a vector-input stat from several scalar-input stats.  For a new
+observation `y`, `y[i]` is sent to `stats[i]`.
+
+# Examples
+
+    x = randn(100, 2)
+
+    fit!(Group(Mean(), Mean()), x)
+    fit!(Group(Mean(), Variance()), x)
+
+    o = fit!(Group(m1 = Mean(), m2 = Mean()), x)
+    o.stats.m1
+    o.stats.m2
+"""
+struct Group{T, S} <: StatCollection{S}
+    stats::T
+    function Group(stats::T) where {T}
+        inputs = map(input, stats)
+        tup = Tuple{inputs...}
+        S = Union{tup, NamedTuple{names, tup}, AbstractVector{<: promote_type(inputs...)}} where names
+        new{T,S}(stats)
+    end
+end
+Group(o::OnlineStat...) = Group(o)
+Group(;o...) = Group(o.data)
+nobs(o::Group) = nobs(first(o.stats))
+Base.:(==)(a::Group, b::Group) = all(a.stats .== b.stats)
+
+Base.getindex(o::Group, i) = o.stats[i]
+Base.first(o::Group) = first(o.stats)
+Base.last(o::Group) = last(o.stats)
+Base.length(o::Group) = length(o.stats)
+Base.values(o::Group) = map(value, o.stats)
+
+Base.iterate(o::Group) = (o.stats[1], 2)
+Base.iterate(o::Group, i) = i > length(o) ? nothing : (o.stats[i], i + 1)
+
+@generated function _fit!(o::Group{T}, y) where {T}
+    N = fieldcount(T)
+    :(Base.Cartesian.@nexprs $N i -> @inbounds(_fit!(o.stats[i], y[i])))
+end
+function _fit!(o::Group{T}, y) where {T<:AbstractVector}
+    for (i,yi) in enumerate(y)
+        _fit!(o.stats[i], yi)
+    end
+end
+
+_merge!(o::Group, o2::Group) = map(merge!, o.stats, o2.stats)
+
+Base.:*(n::Integer, o::OnlineStat) = Group([copy(o) for i in 1:n]...)
+
+
+#-----------------------------------------------------------------------# GroupBy
+"""
+    GroupBy{T}(stat)
+    GroupBy(T, stat)
+
+Update `stat` for each group (of type `T`).  A single observation is either a (named)
+tuple with two elements or a Pair.
+
+# Example
+
+    x = rand(1:10, 10^5)
+    y = x .+ randn(10^5)
+    fit!(GroupBy{Int}(Extrema()), zip(x,y))
+"""
+mutable struct GroupBy{T, S, O <: OnlineStat{S}} <: OnlineStat{TwoThings{T,S}}
+    value::OrderedDict{T, O}
+    init::O
+    n::Int
+    function GroupBy(value::OrderedDict{T,O}, init::O, n::Int) where {T,S,O<:OnlineStat{S}}
+        new{T,S,O}(value, init, n)
+    end
+end
+GroupBy(T::Type, stat::O) where {O<:OnlineStat} = GroupBy(OrderedDict{T, O}(), stat, 0)
+function _fit!(o::GroupBy, xy)
+    o.n += 1
+    x, y = xy
+    x in keys(o.value) ? fit!(o.value[x], y) : (o.value[x] = fit!(copy(o.init), y))
+end
+Base.getindex(o::GroupBy{T}, i::T) where {T} = o.value[i]
+function Base.show(io::IO, o::GroupBy{T,S,O}) where {T,S,O}
+    print(io, name(o, false, false) * ": $T => $O")
+    for (i, (k,v)) in enumerate(o.value)
+        char = i == length(o.value) ?  '└' : '├'
+        print(io, "\n  $(char)── $k: $v")
+    end
+end
+function _merge!(a::GroupBy{T,O}, b::GroupBy{T,O}) where {T,O}
+    a.init == b.init || error("Cannot merge GroupBy objects with different inits")
+    a.n += b.n
+    merge!((o1, o2) -> merge!(o1, o2), a.value, b.value)
+end
 
 #-----------------------------------------------------------------------# Mean
 """
@@ -83,6 +225,57 @@ function _merge!(o::Mean, o2::Mean)
 end
 Statistics.mean(o::Mean) = o.μ
 Base.copy(o::Mean) = Mean(o.μ, o.weight, o.n)
+
+#-----------------------------------------------------------------------# Moments
+"""
+    Moments(; weight=EqualWeight())
+
+First four non-central moments.
+
+# Example
+
+    o = fit!(Moments(), randn(1000))
+    mean(o)
+    var(o)
+    std(o)
+    skewness(o)
+    kurtosis(o)
+"""
+mutable struct Moments{W} <: OnlineStat{Number}
+    m::Vector{Float64}
+    weight::W
+    n::Int
+end
+Moments(;weight = EqualWeight()) = Moments(zeros(4), weight, 0)
+function _fit!(o::Moments, y::Real)
+    γ = o.weight(o.n += 1)
+    y2 = y * y
+    @inbounds o.m[1] = smooth(o.m[1], y, γ)
+    @inbounds o.m[2] = smooth(o.m[2], y2, γ)
+    @inbounds o.m[3] = smooth(o.m[3], y * y2, γ)
+    @inbounds o.m[4] = smooth(o.m[4], y2 * y2, γ)
+end
+Statistics.mean(o::Moments) = o.m[1]
+function Statistics.var(o::Moments; corrected=true)
+    out = (o.m[2] - o.m[1] ^ 2)
+    corrected ? bessel(o) * out : out
+end
+function StatsBase.skewness(o::Moments)
+    v = value(o)
+    vr = o.m[2] - o.m[1]^2
+    (v[3] - 3.0 * v[1] * vr - v[1] ^ 3) / vr ^ 1.5
+end
+function StatsBase.kurtosis(o::Moments)
+    # v = value(o)
+    # (v[4] - 4.0 * v[1] * v[3] + 6.0 * v[1] ^ 2 * v[2] - 3.0 * v[1] ^ 4) / var(o) ^ 2 - 3.0
+    m1, m2, m3, m4 = value(o)
+    (m4 - 4.0 * m1 * m3 + 6.0 * m1^2 * m2 - 3.0 * m1 ^ 4) / var(o; corrected=false) ^ 2 - 3.0
+end
+function _merge!(o::Moments, o2::Moments)
+    γ = o2.n / (o.n += o2.n)
+    smooth!(o.m, o2.m, γ)
+    o
+end
 
 #-----------------------------------------------------------------------# Sum
 """
@@ -144,21 +337,6 @@ value(o::Variance) = o.n > 1 ? o.σ2 * bessel(o) : 1.0
 Statistics.var(o::Variance) = value(o)
 Statistics.mean(o::Variance) = o.μ
 
-
-#-----------------------------------------------------# StatCollection (Series and Group)
-abstract type StatCollection{T} <: OnlineStat{T} end
-
-function Base.show(io::IO, o::StatCollection)
-    print(io, name(o, false, false))
-    print_stat_tree(io, o.stats)
-end
-
-function print_stat_tree(io::IO, stats)
-    for (i, stat) in enumerate(stats)
-        char = i == length(stats) ? '└' : '├'
-        print(io, "\n  $(char)── $stat")
-    end
-end
 
 #-----------------------------------------------------------------------# Series
 """
