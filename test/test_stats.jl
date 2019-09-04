@@ -98,6 +98,7 @@ println("  > Extrema")
     @test value(fit!(Extrema(String), ["a", "b"])) == ("a", "b")
 end
 #-----------------------------------------------------------------------# Group
+println("  > Group")
 @testset "Group" begin
     o = fit!(5Mean(), OnlineStatsBase.eachrow(ymat))
     @test o[1] == first(o)
@@ -118,8 +119,16 @@ end
     for (ai, bi) in zip(a, b)
         @test value(ai) ≈ value(bi)
     end
+
+    @test length(values(a)) == 5
+
+    c = fit!(Group([Mean(), Mean()]), zip(1:10, 1:10))
+    for m in c
+        @test value(m) ≈ mean(1:10)
+    end
 end
 #-----------------------------------------------------------------------# GroupBy
+println("  > GroupBy")
 @testset "GroupBy" begin
     @test GroupBy(Bool, Mean()) == GroupBy(Bool, Mean())
     d = value(fit!(GroupBy(Bool, Mean()), zip(x,y)))
@@ -131,6 +140,8 @@ end
     for (ai,bi) in zip(values(sort(a)), values(sort(b)))
         @test value(ai) ≈ value(bi)
     end
+    @test value(a[1]) ≈ value(b[1])
+    string(GroupBy(Int, Mean()))
 end
 #-----------------------------------------------------------------------# Mean
 println("  > Mean")
@@ -141,6 +152,7 @@ println("  > Mean")
     @test ≈(mergevals(Mean(), y, y2)...)
 end
 #-----------------------------------------------------------------------# Moments
+println("  > Moments")
 @testset "Moments" begin
     o = fit!(Moments(), y)
     @test value(o) ≈ [mean(y), mean(y .^ 2), mean(y .^ 3), mean(y .^ 4)]
@@ -174,13 +186,20 @@ println("  > Series/FTSeries")
         o = fit!(FTSeries(Mean(); transform=abs, filter=!ismissing), data)
         @test value(o)[1] ≈ mean(abs, y)
         @test o.nfiltered == 20
+
+        o2 = fit!(FTSeries(Float64, Mean(); transform=abs, filter=!ismissing), data)
+        @test value(o2)[1] ≈ mean(abs, y)
+        @test o2.nfiltered == 20
+
+        a, b = mergestats(FTSeries(Mean(), Variance(); transform=abs, filter=!ismissing), y, y2)
+        @test a.nfiltered == b.nfiltered
     end
 end
 
 #-----------------------------------------------------------------------# Sum
 println("  > Sum")
 @testset "Sum" begin
-    @test value(fit!(Sum(Int), x)) == sum(x)
+    @test sum(fit!(Sum(Int), x)) == sum(x)
     @test value(fit!(Sum(), y)) ≈ sum(y)
     @test value(fit!(Sum(Int), z)) == sum(z)
 
